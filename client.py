@@ -6,6 +6,7 @@ import os
 import requests
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
+from anthropic import Anthropic
 
 import logging
 logger = logging.getLogger(__name__)
@@ -18,6 +19,7 @@ class MCPClient:
         # Initialize session and client objects
         self.session: Optional[ClientSession] = None
         self.exit_stack = AsyncExitStack()
+        self.anthropic = Anthropic()
 
     async def connect_to_server(self) -> None:
         """Connect to an MCP server"""
@@ -62,60 +64,94 @@ class MCPClient:
             lines.append("")
         return "\n".join(lines)
 
-    
-    def call_llm(self, prompt: str) -> str:
-        """ Call the LLM with the provided promot"""
-        
-        response = requests.post(
-            f"{os.getenv("LLM_URL")}/api/generate",
-            json= {
-                "model": os.getenv("LLM_MODEL"),
-                "prompt": prompt,
-                "stream": False
-            }
-        )
-        
-        if response.status_code == 200:
-            return response.json()["response"]
-        else:
-            return f"Error calling LLAMA: {response.status_code}"
-        
-    
-    async def process(self, prompt: str) -> dict[str, any]:
-        #call LLM to generate SQL based on the user prompt
-
+    async def process_query(self, query: str) -> str:
         context = await self.get_context()
 
         sql_generation_prompt = f"""
-            You are a database analyst that generates valid SQL SELECT statements from user prompts.
+            You are a database analyst that receives a prompt and creates a SQL SELECT statement and then
+            executes it using the tools available
 
             ### Database Schema:
 
             {context}
 
             ### User Prompt:
-            {prompt}
+            {query}
 
             ### Instructions:
             1. Analyze the user's prompt to determine what data they are requesting.
             2. Use the table schemas above to understand the relationships between tables, especially foreign keys.
-            3. Only output a valid SQL SELECT query (no explanations or extra text).
-            4. Use JOINs where appropriate (not everywhere) to connect tables using foreign key relationships.
-            5. Alias tables if needed for clarity.
-            6. Include only relevant columns based on the user prompt.
+            3. Use JOINs where appropriate (not everywhere) to connect tables using foreign key relationships.
+            4. Include only relevant columns based on the user prompt.
+            5. Execute the SQL SELECT statement
 
         """
-        
-        generated_sql = self.call_llm(sql_generation_prompt)
-        
-        print("\n SQL:", generated_sql)
 
-        if generated_sql.strip().upper().startswith('SELECT'):
-            res = await self.session.call_tool("Execute SQL", {"sql": generated_sql})
-            return ''.join(str(content.text) for content in res.content)
-        else:
-            await self.process(prompt)
+        messages = [
+            {
+                "role": "user",
+                "content": sql_generation_prompt
+            }
+        ]
 
+        response = await self.session.list_tools()
+        available_tools = [{
+            "name": tool.name,
+            "description": tool.description,
+            "input_schema": tool.inputSchema
+        } for tool in response.tools]
+
+        # Initial Claude API call
+        response = self.anthropic.messages.create(
+            model="claude-3-5-sonnet-20241022",
+            max_tokens=1000,
+            messages=messages,
+            tools=available_tools
+        )
+
+        # Process response and handle tool calls
+        final_text = []
+
+        assistant_message_content = []
+        for content in response.content:
+            if content.type == 'text':
+                final_text.append(content.text)
+                assistant_message_content.append(content)
+            elif content.type == 'tool_use':
+                tool_name = content.name
+                tool_args = content.input
+
+                # Execute tool call
+                result = await self.session.call_tool(tool_name, tool_args)
+                final_text.append(f"[Calling tool {tool_name} with args {tool_args}]")
+
+                assistant_message_content.append(content)
+                messages.append({
+                    "role": "assistant",
+                    "content": assistant_message_content
+                })
+                messages.append({
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": content.id,
+                            "content": result.content
+                        }
+                    ]
+                })
+
+                # Get next response from Claude
+                response = self.anthropic.messages.create(
+                    model="claude-3-5-sonnet-20241022",
+                    max_tokens=1000,
+                    messages=messages,
+                    tools=available_tools
+                )
+
+                final_text.append(response.content[0].text)
+
+        return "\n".join(final_text)
 
     async def chat_loop(self) -> None:
         """Run an interactive chat loop"""
@@ -129,8 +165,9 @@ class MCPClient:
                 if prompt.lower() == 'quit':
                     break
 
-                response = await self.process(prompt)
-                print("\nResponse: " + response)
+                # response = await self.process(prompt)
+                response = await self.process_query(prompt)
+                print("\nResponse: \n" + response)
 
             except Exception as e:
                 print(f"\nError: {str(e)}")
