@@ -52,7 +52,7 @@ mcp = FastMCP("PSQL Server", lifespan=app_lifespan)
 
 
 @mcp.tool(
-        name="Execute SQL", 
+        name="execute_sql", 
         description="Tool for executing SQL queries at the database"
         )
 async def execute_sql(sql: str) -> dict[str, any]:
