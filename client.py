@@ -84,7 +84,7 @@ Based on the user's request, choose the single most appropriate resource from th
 
 ### Instructions:
 - Analyze the user's prompt and the resource descriptions.
-- Respond with ONLY the URI of the best resource to use. Do not include any other text or explanation.
+- Respond with ONLY the URI of the best resource to use. Never include any other text or explanation.
 """
         
         resource_selection_message = self.anthropic.messages.create(
